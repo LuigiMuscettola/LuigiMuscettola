@@ -1,4 +1,4 @@
--- Quantum Nova 4.0 | Original client utility
+-- Quantum Nova 4.1 | Compatibility and diagnostics hotfix
 -- Uses standard Roblox APIs only. Includes optional experimental StartQuest/AddPoint requests; no server-side bypass.
 -- Game-specific automation is limited to objects and actions exposed to the client.
 -- All automation is disabled on launch. No telemetry or external code downloads.
@@ -3399,8 +3399,11 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local StarterGui = game:GetService("StarterGui")
 local player = Players.LocalPlayer
-assert(player, "Quantum Nova requires a local player")
-local playerGui = player:WaitForChild("PlayerGui")
+local deadline=os.clock()+20
+while not player and os.clock()<deadline do task.wait(.2);player=Players.LocalPlayer end
+assert(player, "Quantum Nova: LocalPlayer unavailable")
+local playerGui = player:WaitForChild("PlayerGui",20)
+assert(playerGui, "Quantum Nova: PlayerGui unavailable")
 local existing = playerGui:FindFirstChild("QuantumNova")
 if existing then existing:Destroy() end
 local C={
@@ -3466,6 +3469,8 @@ state.manualStarted=0
 state.lastManualInput=0
 state.lastAttackReason="Pronto"
 local conns={}
+state.errorByLabel={}
+state.lastIssue="Nessun errore registrato"
 local function releaseAttack()
     local tool=state.lastTool
     if tool and tool.Parent then pcall(function() tool:Deactivate() end) end
@@ -3502,7 +3507,9 @@ local function button(parent,s,props,fn)
     corner(b,8)
     if fn then connect(b.Activated,function()
         local ok,err=pcall(fn)
-        if not ok then state.errors=state.errors+1;warn("[Nova]",err) end
+        if not ok then
+            state.errors=state.errors+1;state.lastIssue=tostring(err);warn("[Nova]",err)
+        end
     end) end
     return b
 end
@@ -3529,7 +3536,7 @@ corner(logo,12)
 make("UIGradient",logo,{Color=ColorSequence.new(C.accent,C.accent2),Rotation=35})
 text(logo,"Q",{Size=UDim2.fromScale(1,1),TextSize=25,Font=Enum.Font.GothamBlack,TextXAlignment=Enum.TextXAlignment.Center})
 text(header,"QUANTUM NOVA",{Position=UDim2.fromOffset(63,9),Size=UDim2.new(1,-265,0,24),TextSize=19,Font=Enum.Font.GothamBold})
-text(header,"V4.0  /  ORIGINAL EDITION",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
+text(header,"V4.1  /  COMPATIBILITY FIX",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
 local mini=button(gui,"Q  NOVA",{Size=UDim2.fromOffset(90,42),Position=UDim2.fromOffset(10,90),Visible=false,BackgroundColor3=C.accent},function() window.Visible=true;gui:FindFirstChild("Mini").Visible=false end)
 mini.Name="Mini"
 button(header,"–",{Size=UDim2.fromOffset(34,34),Position=UDim2.new(1,-78,0,13)},function() window.Visible=false;mini.Visible=true end)
@@ -3609,6 +3616,9 @@ local function toggle(parent,label,key,changed)
     end
     b=button(row,"OFF",{Size=UDim2.fromOffset(76,30),Position=UDim2.new(1,-86,.5,-15)},function()
         cfg[key]=not cfg[key]
+        if cfg[key] and (key=="farm" or key=="fruit" or key=="chest" or key=="autoQuest" or key=="raidAssist" or key=="bountyAssist") then
+            state.paused=false;state.pauseFromManual=false;state.lastSearch=-math.huge
+        end
         refresh()
         if changed then changed(cfg[key]) end
         log(label..": "..tostring(cfg[key]))
@@ -3992,11 +4002,29 @@ local function setTarget(t,now)
 end
 local function equip(c,h)
     local query=cfg.weapon:lower();local current=c:FindFirstChildOfClass("Tool")
-    if current and (query=="" or current.Name:lower():find(query,1,true)) then return current end
-    local backpack=player:FindFirstChildOfClass("Backpack");if not backpack then return end
-    for _,tool in ipairs(backpack:GetChildren()) do
-        if tool:IsA("Tool") and (query=="" or tool.Name:lower():find(query,1,true)) then h:EquipTool(tool);return tool end
+    local function rank(tool)
+        if not tool or not tool:IsA("Tool") then return 0 end
+        if query~="" then
+            local n=tool.Name:lower()
+            return n==query and 100 or (n:find(query,1,true) and 90 or 0)
+        end
+        local tip=tool.ToolTip:lower()
+        if tip=="melee" then return 30 end
+        if tip=="sword" then return 25 end
+        if tip=="gun" or tip=="blox fruit" or tip=="devil fruit" then return 10 end
+        return 0
     end
+    local best,score=current,rank(current)
+    local backpack=player:FindFirstChildOfClass("Backpack")
+    if backpack then
+        for _,tool in ipairs(backpack:GetChildren()) do
+            local n=rank(tool)
+            if n>score then best,score=tool,n end
+        end
+    end
+    if score<=0 then return nil end
+    if best.Parent~=c then h:EquipTool(best) end
+    return best
 end
 local function move(h,r,goal,now)
     if not goal then return end
@@ -4049,9 +4077,10 @@ local function attackNPC(c,h,r,t,now)
         return false
     end
     if now-state.lastAttack<cfg.attackInterval then return true end
+    if state.pendingAttack then state.lastAttackReason="Attendo riscontro HP";return true end
     local before=c:FindFirstChildOfClass("Tool")
     local weapon=equip(c,h)
-    if not weapon then state.lastAttackReason="Nessuna arma";return false end
+    if not weapon then state.lastAttackReason="Arma non riconosciuta: imposta il nome esatto in Farming";return false end
     if weapon~=before or weapon~=state.equipped then
         state.equipped=weapon;state.equipAt=now
         state.lastAttackReason="Equipaggiamento"
@@ -4140,7 +4169,7 @@ local function tick(now)
         state.lastSearch=now;t=chooseTarget(r,now);setTarget(t,now)
         for obj,expiry in pairs(state.excluded) do if expiry<=now or not obj.Parent then state.excluded[obj]=nil end end
     end
-    if not t then state.mode="Searching...";highlight.Enabled=false;h:MoveTo(r.Position);return end
+    if not t then state.mode="Nessun bersaglio compatibile nel raggio "..cfg.radius;highlight.Enabled=false;h:MoveTo(r.Position);return end
     highlight.Adornee=t.obj;highlight.Enabled=cfg.marker
     local dist=(t.part.Position-r.Position).Magnitude
     state.mode=t.kind.." | "..t.obj.Name.." | "..math.floor(dist).." st"
@@ -4381,11 +4410,8 @@ do
         for _,k in ipairs({"autoQuest","raidAssist","bountyAssist"}) do
             if k~=key then stopMode(k) end
         end
-        state.target=nil
+        setTarget(nil,os.clock())
         state.manualGoal=nil
-        state.goal=nil
-        state.waypoints=nil
-        state.generation=state.generation+1
         ex.lastMode=""
     end
     local function requestQuest(q)
@@ -4647,9 +4673,17 @@ do
         return cfg.autoQuest or cfg.raidAssist or cfg.bountyAssist or cfg.autoRace3 or cfg.autoRace4 or cfg.autoStats
     end
     function E.tick(now)
-        if now>=ex.nextObservation then ex.nextObservation=now+.5;observe() end
+        if now>=ex.nextObservation then
+            ex.nextObservation=now+.5
+            local ok,err=pcall(observe)
+            if not ok then state.lastIssue="Dati gioco: "..tostring(err) end
+        end
         local c,h,r=character()
-        if c and now>=ex.nextScan then ex.nextScan=now+2.5;scanEvents(r) end
+        if c and now>=ex.nextScan and (cfg.eventWatch or state.view=="Eventi") then
+            ex.nextScan=now+2.5
+            local ok,err=pcall(scanEvents,r)
+            if not ok then state.lastIssue="Eventi: "..tostring(err) end
+        end
         if not c or state.paused or state.manualGoal then return false end
         if (cfg.autoQuest or cfg.raidAssist or cfg.bountyAssist) and cfg.heal and h.Health/math.max(h.MaxHealth,1)*100<=cfg.minHealth then
             stopMovement(h,r);setStatus("Protezione salute: attesa recupero");state.retreat=true;return true
@@ -4829,11 +4863,23 @@ local function safeRun(label,fn)
     local ok,err=pcall(fn)
     if not ok then
         state.errors=state.errors+1
-        if os.clock()-state.lastError>5 then
-            state.lastError=os.clock();log(label..": "..tostring(err));warn("[QuantumNova]",label,err)
+        state.lastIssue=label..": "..tostring(err)
+        local now=os.clock()
+        if not state.errorByLabel[label] or now-state.errorByLabel[label]>5 then
+            state.errorByLabel[label]=now;log(state.lastIssue);warn("[QuantumNova]",label,err)
         end
     end
 end
+action(diagnostics,"Verifica compatibilita corrente","VERIFICA",function()
+    local c,h,r=character()
+    local enemies=workspace:FindFirstChild("Enemies") or workspace:FindFirstChild("NPCs")
+    local backpack=player:FindFirstChildOfClass("Backpack")
+    local equipped=c and c:FindFirstChildOfClass("Tool")
+    local main=playerGui:FindFirstChild("Main")
+    local lines={"PlaceId: "..tostring(game.PlaceId),"Personaggio: "..tostring(c~=nil),"NPC caricati: "..tostring(enemies and #enemies:GetChildren() or 0),"Strumenti nello zaino: "..tostring(backpack and #backpack:GetChildren() or 0),"Arma: "..(equipped and equipped.Name or "nessuna"),"Quest GUI: "..tostring(main and main:FindFirstChild("Quest")~=nil or false),"Ultimo errore: "..state.lastIssue}
+    for _,lineText in ipairs(lines) do log(lineText);print("[NovaCheck] "..lineText) end
+    notify("Controllo completato: leggi Diagnostica")
+end)
 local clocks={engine=0,ui=0,marks=0,cache=0,inventory=0,perf=0}
 local function elapsed(dt,key,interval)
     local nextClock,ready=MathCore.stepClock(clocks[key],dt,interval)
@@ -4842,7 +4888,7 @@ local function elapsed(dt,key,interval)
 end
 local function updateUI()
     fit()
-    expansion.updateUI()
+    safeRun("Interfaccia espansione",expansion.updateUI)
     local _,h,r=character()
     local hp=h and math.floor(100*h.Health/math.max(h.MaxHealth,1)) or 0
     local duration=math.floor(os.clock()-state.started)
@@ -4887,5 +4933,5 @@ connect(gui.Destroying,function()
     for _,c in ipairs(conns) do c:Disconnect() end
     table.clear(conns)
 end)
-log("Quantum Nova 4.0 caricato; automazioni OFF")
-print("[QuantumNova] V4.0 loaded. All automation starts OFF.")
+log("Quantum Nova 4.1 caricato; automazioni OFF")
+print("[QuantumNova] V4.1 loaded. All automation starts OFF.")
