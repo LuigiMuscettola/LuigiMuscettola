@@ -1,4 +1,4 @@
--- Trade Control V1.0: local simulated trades only.
+-- Trade Control V1.1: local simulated trades only.
 -- No real inventory, game remotes, or other player input is accessed.
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
@@ -44,7 +44,58 @@ local function button(text, y, callback)
     return b
 end
 
-label("TRADE CONTROL - SIMULATOR", 5, 30)
+local title = label("TRADE CONTROL - SIMULATOR  [MOVE]", 5, 30)
+title.Active = true
+title.TextSize = 12
+
+-- Drag the title using a mouse or one finger, without intercepting buttons.
+local UIS = game:GetService("UserInputService")
+local dragInput, startPointer, startPosition
+local function movePanel(pointer)
+    if not startPosition or not startPointer then return end
+    local delta = pointer - startPointer
+    local bounds = gui.AbsoluteSize
+    local size = frame.AbsoluteSize
+    local x = startPosition.X.Scale * bounds.X + startPosition.X.Offset + delta.X
+    local y = startPosition.Y.Scale * bounds.Y + startPosition.Y.Offset + delta.Y
+    -- Keep the title reachable even on a small screen.
+    x = math.clamp(x, 0, math.max(0, bounds.X - size.X))
+    y = math.clamp(y, 0, math.max(0, bounds.Y - math.min(size.Y, 40)))
+    frame.Position = UDim2.fromOffset(x, y)
+end
+
+local begin = title.InputBegan:Connect(function(input)
+    if dragInput then return end
+    local kind = input.UserInputType
+    if kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.Touch then
+        dragInput = input
+        startPointer = input.Position
+        startPosition = frame.Position
+    end
+end)
+
+local changed = UIS.InputChanged:Connect(function(input)
+    if not dragInput then return end
+    if dragInput.UserInputType == Enum.UserInputType.Touch then
+        if input == dragInput then movePanel(input.Position) end
+    elseif input.UserInputType == Enum.UserInputType.MouseMovement then
+        movePanel(input.Position)
+    end
+end)
+
+local ended = UIS.InputEnded:Connect(function(input)
+    if input == dragInput or (dragInput and
+        dragInput.UserInputType == Enum.UserInputType.MouseButton1 and
+        input.UserInputType == Enum.UserInputType.MouseButton1) then
+        dragInput, startPointer, startPosition = nil, nil, nil
+    end
+end)
+
+gui.Destroying:Connect(function()
+    begin:Disconnect()
+    changed:Disconnect()
+    ended:Disconnect()
+end)
 local status = label("In attesa", 38, 30)
 local offerLabel = label("Offerta: --", 68, 25)
 
