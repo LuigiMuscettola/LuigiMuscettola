@@ -1,4 +1,4 @@
--- Quantum Nova 4.1 | Compatibility and diagnostics hotfix
+-- Quantum Nova 4.2 | Runtime recovery and actionable diagnostics
 -- Uses standard Roblox APIs only. Includes optional experimental StartQuest/AddPoint requests; no server-side bypass.
 -- Game-specific automation is limited to objects and actions exposed to the client.
 -- All automation is disabled on launch. No telemetry or external code downloads.
@@ -3471,6 +3471,11 @@ state.lastAttackReason="Pronto"
 local conns={}
 state.errorByLabel={}
 state.lastIssue="Nessun errore registrato"
+state.moduleStatus={}
+state.engineBusy=false
+state.lastScanCount=0
+state.lastScanReject={}
+state.engineCycles=0
 local function releaseAttack()
     local tool=state.lastTool
     if tool and tool.Parent then pcall(function() tool:Deactivate() end) end
@@ -3536,7 +3541,7 @@ corner(logo,12)
 make("UIGradient",logo,{Color=ColorSequence.new(C.accent,C.accent2),Rotation=35})
 text(logo,"Q",{Size=UDim2.fromScale(1,1),TextSize=25,Font=Enum.Font.GothamBlack,TextXAlignment=Enum.TextXAlignment.Center})
 text(header,"QUANTUM NOVA",{Position=UDim2.fromOffset(63,9),Size=UDim2.new(1,-265,0,24),TextSize=19,Font=Enum.Font.GothamBold})
-text(header,"V4.1  /  COMPATIBILITY FIX",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
+text(header,"V4.2  /  RUNTIME RECOVERY",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
 local mini=button(gui,"Q  NOVA",{Size=UDim2.fromOffset(90,42),Position=UDim2.fromOffset(10,90),Visible=false,BackgroundColor3=C.accent},function() window.Visible=true;gui:FindFirstChild("Mini").Visible=false end)
 mini.Name="Mini"
 button(header,"–",{Size=UDim2.fromOffset(34,34),Position=UDim2.new(1,-78,0,13)},function() window.Visible=false;mini.Visible=true end)
@@ -3607,6 +3612,7 @@ local function line(parent,label,height)
     register(parent,row,label)
     return row
 end
+local primaryModes={farm=true,fruit=true,chest=true,autoQuest=true,raidAssist=true,bountyAssist=true}
 local function toggle(parent,label,key,changed)
     local row=line(parent,label)
     local b
@@ -3616,8 +3622,17 @@ local function toggle(parent,label,key,changed)
     end
     b=button(row,"OFF",{Size=UDim2.fromOffset(76,30),Position=UDim2.new(1,-86,.5,-15)},function()
         cfg[key]=not cfg[key]
-        if cfg[key] and (key=="farm" or key=="fruit" or key=="chest" or key=="autoQuest" or key=="raidAssist" or key=="bountyAssist") then
+        if cfg[key] and primaryModes[key] then
             state.paused=false;state.pauseFromManual=false;state.lastSearch=-math.huge
+            for other in pairs(primaryModes) do
+                if other~=key and cfg[other] then
+                    cfg[other]=false
+                    if refreshers[other] then refreshers[other]() end
+                end
+            end
+            state.target=nil;state.goal=nil;state.waypoints=nil
+            state.pendingAttack=nil;releaseAttack()
+            state.generation=state.generation+1
         end
         refresh()
         if changed then changed(cfg[key]) end
@@ -3636,7 +3651,7 @@ local function field(parent,label,key,numeric,lo,hi)
         if numeric then
             local n=tonumber(input.Text)
             if n and n==n then cfg[key]=math.clamp(n,lo,hi) end
-        else cfg[key]=input.Text:sub(1,80) end
+        else cfg[key]=(input.Text:match("^%s*(.-)%s*$") or ""):sub(1,80) end
         refresh()
     end)
 end
@@ -3948,11 +3963,15 @@ local function predictedPosition(t,root,now)
 end
 local function chooseTarget(root,now)
     local best,bestDistance=nil,math.huge
+    state.lastScanCount=0
+    state.lastScanReject={range=0,excluded=0,root=0}
     state.metrics.searches=state.metrics.searches+1
     local function consider(obj,part,kind,hum)
-        if not part or not part:IsA("BasePart") or isExcluded(obj,now) then return end
+        state.lastScanCount=state.lastScanCount+1
+        if not part or not part:IsA("BasePart") then state.lastScanReject.root=state.lastScanReject.root+1;return end
+        if isExcluded(obj,now) then state.lastScanReject.excluded=state.lastScanReject.excluded+1;return end
         local dist=(part.Position-root.Position).Magnitude
-        if dist>cfg.radius then return end
+        if dist>cfg.radius then state.lastScanReject.range=state.lastScanReject.range+1;return end
         local score=dist
         if cfg.targetWeight then
             local hp=hum and hum.Health/math.max(hum.MaxHealth,1) or 0
@@ -4068,6 +4087,7 @@ local function settleAttack(now)
         state.metrics.confirmed=state.metrics.confirmed+1
     else
         state.metrics.unconfirmed=state.metrics.unconfirmed+1
+        state.lastAttackReason="Attivazione inviata, nessun calo HP osservato"
     end
 end
 local function attackNPC(c,h,r,t,now)
@@ -4095,7 +4115,7 @@ local function attackNPC(c,h,r,t,now)
     state.metrics.attempts=state.metrics.attempts+1
     local healthBefore=t.hum.Health
     local ok,err=pcall(function() weapon:Activate() end)
-    if not ok then state.lastAttackReason=tostring(err);state.errors=state.errors+1;return false end
+    if not ok then state.lastAttackReason=tostring(err);state.lastIssue="M1: "..tostring(err);state.errors=state.errors+1;return false end
     state.attacks=state.attacks+1
     state.lastTool=weapon
     state.lastAttackReason="Attivazione richiesta"
@@ -4113,7 +4133,7 @@ local function tick(now)
     if not c then releaseAttack();state.pendingAttack=nil;state.mode="Attesa respawn";highlight.Enabled=false;return end
     if c~=state.char then state.char=c;setTarget(nil,now);state.retreat=false;state.lastSearch=0 end
     local hp=100*h.Health/math.max(h.MaxHealth,1)
-    if state.paused then releaseAttack();if not state.pauseFromManual then h:MoveTo(r.Position) end;state.mode="Pausa";highlight.Enabled=false;return end
+    if state.paused then releaseAttack();if not state.pauseFromManual then h:MoveTo(r.Position) end;state.mode=state.pauseFromManual and "Pausa input manuale: premi RIPRENDI" or "Pausa: premi RIPRENDI";highlight.Enabled=false;return end
     if not cfg.heal then state.retreat=false else state.retreat=MathCore.healthMode(state.retreat,hp,cfg.minHealth,cfg.recoverHealth) end
     if state.manualGoal and now-state.manualStarted>cfg.manualTimeout then
         state.manualGoal=nil;setTarget(nil,now);h:MoveTo(r.Position);log("Timeout navigazione")
@@ -4169,7 +4189,11 @@ local function tick(now)
         state.lastSearch=now;t=chooseTarget(r,now);setTarget(t,now)
         for obj,expiry in pairs(state.excluded) do if expiry<=now or not obj.Parent then state.excluded[obj]=nil end end
     end
-    if not t then state.mode="Nessun bersaglio compatibile nel raggio "..cfg.radius;highlight.Enabled=false;h:MoveTo(r.Position);return end
+    if not t then
+        local rejects=state.lastScanReject
+        state.mode=string.format("Nessun target | Candidati %d | Fuori raggio %d | In attesa %d",state.lastScanCount,rejects.range or 0,rejects.excluded or 0)
+        highlight.Enabled=false;h:MoveTo(r.Position);return
+    end
     highlight.Adornee=t.obj;highlight.Enabled=cfg.marker
     local dist=(t.part.Position-r.Position).Magnitude
     state.mode=t.kind.." | "..t.obj.Name.." | "..math.floor(dist).." st"
@@ -4351,12 +4375,15 @@ do
         local main=playerGui:FindFirstChild("Main")
         local panel=main and main:FindFirstChild("Quest")
         if not visible(panel) then return false,"" end
-        local title=panel:FindFirstChild("Title",true)
-        if title and title:IsA("TextLabel") then return true,title.Text end
+        local fallback=""
         for _,o in ipairs(panel:GetDescendants()) do
-            if o:IsA("TextLabel") and visible(o) and contains(o.Text,"defeat") then return true,o.Text end
+            if (o:IsA("TextLabel") or o:IsA("TextButton")) and visible(o) then
+                local txt=o.Text
+                if contains(txt,"defeat") or contains(txt,"kill") then return true,txt end
+                if normalized(o.Name)=="title" and txt~="" then fallback=txt end
+            end
         end
-        return true,""
+        return true,fallback
     end
     local function raidPanel()
         local main=playerGui:FindFirstChild("Main")
@@ -4381,7 +4408,8 @@ do
         if not folder then return nil end
         local nearest,dist=nil,math.huge
         for _,obj in ipairs(folder:GetChildren()) do
-            if matches(obj.Name,q[6]) or matches(obj.Name,q[4]) then
+            local cleanName=obj.Name:gsub("%s*%b[]",""):gsub("%s*%b()","")
+            if matches(cleanName,q[6]) or matches(cleanName,q[4]) then
                 local part=findRoot(obj)
                 if part then
                     local d=(part.Position-root.Position).Magnitude
@@ -4626,7 +4654,11 @@ do
         if now-(ex.lastAbility[key] or -100)<12 then return end
         if ex.abilityBusy or state.lastTool or state.pendingAttack then return end
         local tool=abilityTool(c,aliases)
-        if not tool then return end
+        if not tool then
+            state.moduleStatus[key]="Strumento abilita non trovato: attivazione non disponibile"
+            return
+        end
+        state.moduleStatus[key]="Strumento trovato: "..tool.Name
         ex.lastAbility[key]=now
         ex.abilityBusy=true
         local before=c:FindFirstChildOfClass("Tool")
@@ -4694,6 +4726,7 @@ do
             end
             state.retreat=false
         end
+        if cfg.autoRace4 and not ex.charge then state.moduleStatus.autoRace4="Energia Race non esposta dal gioco" end
         if cfg.autoRace4 and ex.charge and ex.charge>=100 and not c:FindFirstChild("RaceTransformed") then
             tryAbility(c,h,now,"autoRace4",{"Race Awakening","Race V4","Awakening"})
         end
@@ -4861,6 +4894,7 @@ local function markerRefresh()
 end
 local function safeRun(label,fn)
     local ok,err=pcall(fn)
+    state.moduleStatus[label]=ok and "OK (nessuna eccezione)" or tostring(err)
     if not ok then
         state.errors=state.errors+1
         state.lastIssue=label..": "..tostring(err)
@@ -4869,6 +4903,7 @@ local function safeRun(label,fn)
             state.errorByLabel[label]=now;log(state.lastIssue);warn("[QuantumNova]",label,err)
         end
     end
+    return ok
 end
 action(diagnostics,"Verifica compatibilita corrente","VERIFICA",function()
     local c,h,r=character()
@@ -4879,6 +4914,38 @@ action(diagnostics,"Verifica compatibilita corrente","VERIFICA",function()
     local lines={"PlaceId: "..tostring(game.PlaceId),"Personaggio: "..tostring(c~=nil),"NPC caricati: "..tostring(enemies and #enemies:GetChildren() or 0),"Strumenti nello zaino: "..tostring(backpack and #backpack:GetChildren() or 0),"Arma: "..(equipped and equipped.Name or "nessuna"),"Quest GUI: "..tostring(main and main:FindFirstChild("Quest")~=nil or false),"Ultimo errore: "..state.lastIssue}
     for _,lineText in ipairs(lines) do log(lineText);print("[NovaCheck] "..lineText) end
     notify("Controllo completato: leggi Diagnostica")
+end)
+local runtimePanel=block(diagnostics,"Diagnostica continua",340)
+local runtimeText=text(runtimePanel,"In attesa...",{Position=UDim2.fromOffset(10,8),Size=UDim2.new(1,-20,1,-16),TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,TextSize=12})
+local runtimeCopy=make("TextBox",block(diagnostics,"Rapporto da copiare",130),{Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-16,1,-16),Text="",ClearTextOnFocus=false,MultiLine=true,TextWrapped=true,TextEditable=false,TextColor3=C.text,BackgroundColor3=C.item,TextSize=11,TextYAlignment=Enum.TextYAlignment.Top})
+local function runtimeReport()
+    local c,h,r=character()
+    local enemies=workspace:FindFirstChild("Enemies") or workspace:FindFirstChild("NPCs")
+    local tools={}
+    for _,tool in ipairs(getTools()) do table.insert(tools,tool.Name.." ("..tool.ToolTip..")") end
+    local modes={}
+    for _,key in ipairs({"farm","fruit","chest","autoQuest","raidAssist","bountyAssist","autoRace3","autoRace4","autoStats","eventWatch"}) do
+        if cfg[key] then table.insert(modes,key) end
+    end
+    local lines={"V4.2 | PlaceId "..tostring(game.PlaceId),
+        "Cicli motore: "..state.engineCycles.." | Errori: "..state.errors,
+        "Attivi: "..(#modes>0 and table.concat(modes,", ") or "nessuno"),
+        "Stato: "..state.mode,
+        "Personaggio: "..tostring(c~=nil).." | NPC: "..tostring(enemies and #enemies:GetChildren() or 0),
+        "Strumenti: "..(#tools>0 and table.concat(tools,", ") or "nessuno"),
+        "M1: "..state.lastAttackReason,
+        "Tentativi: "..state.metrics.attempts.." | Calo HP: "..state.metrics.confirmed.." | Nessun calo: "..state.metrics.unconfirmed,
+        "Percorsi: "..state.metrics.paths.." | Falliti: "..state.metrics.pathFailures,
+        "Ultimo errore: "..state.lastIssue}
+    local names={}
+    for name in pairs(state.moduleStatus) do table.insert(names,name) end
+    table.sort(names)
+    for _,name in ipairs(names) do table.insert(lines,name..": "..state.moduleStatus[name]) end
+    return table.concat(lines,"\n")
+end
+action(diagnostics,"Genera rapporto diagnostico","RAPPORTO",function()
+    runtimeCopy.Text=runtimeReport()
+    print("[NovaReport] "..runtimeCopy.Text)
 end)
 local clocks={engine=0,ui=0,marks=0,cache=0,inventory=0,perf=0}
 local function elapsed(dt,key,interval)
@@ -4902,6 +4969,7 @@ local function updateUI()
         metricsText.Text=string.format("M1 richiesti: %d | attivati: %d\nCalo HP osservato: %d | non osservato: %d\nOstacoli: %d | scansioni: %d\nPercorsi: %d | fallimenti: %d\nBlocchi: %d | pause manuali: %d\nUltimo M1: %s",m.attempts,state.attacks,m.confirmed,m.unconfirmed,m.blocked,m.searches,m.paths,m.pathFailures,m.stuck,m.manualStops,state.lastAttackReason)
     end
     if state.view=="Diagnostica" then
+        runtimeText.Text=runtimeReport()
         local list={};for i=1,math.min(#state.log,12) do list[i]=state.log[i] end
         logText.Text=table.concat(list,"\n")
     end
@@ -4909,7 +4977,17 @@ end
 connect(RunService.Heartbeat,function(dt)
     if not state.alive then return end
     if dt>0 then state.fps=state.fps*.92+(1/dt)*.08 end
-    if elapsed(dt,"engine",cfg.engineInterval*(cfg.adaptive and state.fps>0 and state.fps<25 and 1.8 or 1)) then safeRun("Motore",function() local now=os.clock();if not expansion.tick(now) then tick(now) end end) end
+    if elapsed(dt,"engine",cfg.engineInterval*(cfg.adaptive and state.fps>0 and state.fps<25 and 1.8 or 1)) and not state.engineBusy then
+        state.engineBusy=true
+        state.engineCycles=state.engineCycles+1
+        local ok=safeRun("Motore",function()
+            local now=os.clock()
+            settleAttack(now)
+            if not expansion.tick(now) then tick(now) end
+        end)
+        state.engineBusy=false
+        if not ok then state.mode="Errore motore: vedi Diagnostica";releaseAttack() end
+    end
     if elapsed(dt,"ui",.25) then safeRun("Interfaccia",updateUI) end
     if elapsed(dt,"marks",.75) then safeRun("Indicatori",markerRefresh) end
     if elapsed(dt,"cache",3) then safeRun("Cache",refreshChestCache) end
@@ -4933,5 +5011,5 @@ connect(gui.Destroying,function()
     for _,c in ipairs(conns) do c:Disconnect() end
     table.clear(conns)
 end)
-log("Quantum Nova 4.1 caricato; automazioni OFF")
-print("[QuantumNova] V4.1 loaded. All automation starts OFF.")
+log("Quantum Nova 4.2 caricato; automazioni OFF")
+print("[QuantumNova] V4.2 loaded. All automation starts OFF.")
