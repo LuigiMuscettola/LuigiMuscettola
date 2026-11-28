@@ -1,6 +1,6 @@
--- Quantum Nova Enhanced 5.0 | Onyx-inspired independent variant.
--- Base: Quantum Nova 4.4, not the proprietary Quantum Onyx source.
--- Experimental client-side modules; server confirmation is not guaranteed.
+-- Quantum Nova Enhanced 5.0 | Variante indipendente ispirata a Onyx.
+-- Base: Quantum Nova 4.4, non il sorgente originale di Quantum Onyx.
+-- Moduli client sperimentali: la conferma del server non è garantita.
 -- 01 | CONFIGURAZIONE CENTRALIZZATA
 local Config={
     Name="Quantum Nova Enhanced", Version="5.0", GuiName="QuantumNova",
@@ -57,7 +57,7 @@ Config.Defaults.flightBrake=9
 Config.Defaults.flightAvoid=true
 Config.NumericRanges={flightSpeed={15,220},flightBrake={3,15},statBatch={1,25},statReserve={0,10000},predictionLimit={0,.5},velocityTau={.03,1},maxLead={0,12},equipDelay={.05,.5},releaseDelay={.03,.2},standoff={2,10},pathInterval={.4,4},moveInterval={.08,.5},pathShift={4,20},engineInterval={.03,.2},manualTimeout={10,180},radius={20,1200},hitRange={3,15},attackInterval={.12,2},minHealth={5,75},recoverHealth={80,100},timeout={10,120},stuckTimeout={3,30},retryDelay={5,60},scanInterval={.25,5},markDistance={20,1000},markLimit={1,50},uiScale={.65,1.25},logLimit={10,100}}
 Config.AutomationKeys={flightNoclip=true,autoQuest=true,questRequest=true,raidAssist=true,bountyAssist=true,autoRace3=true,autoRace4=true,eventWatch=true,autoStats=true,farm=true,fruit=true,chest=true,heal=true,notifyFruit=true,marker=true,fruitMarks=true,chestMarks=true,npcMarks=true}
--- Noclip is available, but opt-in after startup.
+-- Noclip disponibile, ma da attivare esplicitamente dopo l'avvio.
 Config.Defaults.flightNoclip=false
 -- 02 | FUNZIONI MATEMATICHE E TEST UNITARI INTEGRATI
 local MathCore = {}
@@ -3462,7 +3462,7 @@ while not player and os.clock()<deadline do task.wait(.2);player=Players.LocalPl
 assert(player, "Quantum Nova: LocalPlayer unavailable")
 local playerGui = player:WaitForChild("PlayerGui",Config.MountTimeout)
 assert(playerGui, "Quantum Nova: PlayerGui unavailable")
--- gethui is executor-specific, not a Roblox API. Failure never prevents fallback.
+-- gethui dipende dall'executor, non è un'API Roblox. In caso di errore si usa il fallback.
 local guiParents={}
 do
     local seen={}
@@ -3523,14 +3523,14 @@ state.engineBusy=false
 state.lastScanCount=0
 state.lastScanReject={}
 state.engineCycles=0
--- One controller for all movement modes. Constraints are local and never anchor the character.
+-- Controller unico per il movimento. I vincoli sono locali e non ancorano il personaggio.
 state.flight={root=nil,hum=nil,attachment=nil,velocity=nil,goal=nil,untilTime=0,
     smoothed=Vector3.new(0,0,0),status="Pronto",obstacles=0,detour=nil,detourUntil=0,
     collisionParts={},collisionOwner=nil,nextPartScan=0,collisionCount=0}
 do
     local F=state.flight
     local zero=Vector3.new(0,0,0)
-    -- Keep original values, including false, and only touch our character.
+    -- Conserva i valori originali, incluso false; modifica soltanto il nostro personaggio.
     function F.restoreCollisions()
         for part,original in pairs(F.collisionParts) do
             pcall(function() part.CanCollide=original end)
@@ -3646,7 +3646,7 @@ do
                 local hit=workspace:Raycast(r.Position,delta.Unit*probe,params)
                 if hit and (F.goal-hit.Position).Magnitude>3 then
                     F.obstacles=F.obstacles+1
-                    -- Normal flight only: try open space above or to either side.
+                    -- Solo volo normale: cerca spazio libero sopra o ai lati.
                     local right=delta.Unit:Cross(Vector3.new(0,1,0))
                     if right.Magnitude<.1 then right=Vector3.new(1,0,0) else right=right.Unit end
                     for _,offset in ipairs({Vector3.new(0,15,0),right*15,-right*15,Vector3.new(0,-10,0)}) do
@@ -3864,7 +3864,7 @@ local function field(parent,label,key,numeric,lo,hi)
         refresh()
     end)
 end
--- Slider with mouse/touch dragging; numeric range shares the JSON validator.
+-- Slider trascinabile con mouse o touch; usa gli stessi limiti del validatore JSON.
 local function slider(parent,label,key,step)
     local range=assert(Config.NumericRanges[key])
     local lo,hi=range[1],range[2]
@@ -3897,7 +3897,7 @@ local function slider(parent,label,key,step)
     connect(UserInputService.InputEnded,function(input) if input==active then active=nil end end)
     refreshers[key]=refresh;refresh()
 end
--- Selector expands in its own row, avoiding overlay conflicts on touch screens.
+-- Il selettore si espande nella propria riga per evitare sovrapposizioni.
 local function dropdown(parent,label,key,options)
     local row=line(parent,label,43)
     local open=false
@@ -4275,7 +4275,7 @@ local function chooseTarget(root,now)
         end
         if score<bestDistance then bestDistance=score;best={obj=obj,part=part,kind=kind,hum=hum} end
     end
-    -- Items have priority when enabled. Only loaded world instances are scanned.
+    -- Gli oggetti hanno priorità se abilitati. Scansiona solo le istanze caricate.
     if cfg.fruit or cfg.chest then
         for _,obj in ipairs(workspace:GetChildren()) do
             local n=obj.Name:lower()
@@ -4284,7 +4284,7 @@ local function chooseTarget(root,now)
         end
         local map=workspace:FindFirstChild("Map")
         if cfg.chest and map then
-            -- Search only containers with explicitly recognizable chest names.
+            -- Cerca soltanto contenitori con nomi di forzieri riconoscibili.
             for _,obj in ipairs(state.chestCache) do
                 if obj.Name:lower():find("chest",1,true) and (obj:IsA("Model") or obj:IsA("BasePart")) then consider(obj,findRoot(obj),"Chest") end
             end
@@ -4502,7 +4502,7 @@ local function tick(now)
             if cfg.lineOfSight and not clearLine(r,t.part,t.obj) then move(h,r,t.part.Position,now) end
         end
     elseif t.kind~="NPC" and dist<3 then
-        -- No simulated touch or prompt bypass. Normal game pickup rules apply.
+        -- Nessun tocco simulato: si applicano le normali regole di raccolta del gioco.
         move(h,r,t.part.Position,now)
         if now-state.targetSince>5 then state.excluded[t.obj]=now+15;setTarget(nil,now) end
     else
@@ -4517,8 +4517,8 @@ local function tick(now)
 end
 
 -- 07 | MODULI SPECIFICI DEL GIOCO (SPERIMENTALI)
--- A single controller; no competing movement loop.
--- Community quest command is experimental; no server-side verification available here.
+-- Controller unico, senza cicli di movimento concorrenti.
+-- Comando missione sperimentale: non disponiamo di una verifica lato server.
 expansion = {}
 do
     local E = expansion
@@ -4759,7 +4759,7 @@ do
                 ex.nextQuest=os.clock()+MathCore.cooldown(4,ex.questFailures,60)
                 log("Quest: richiesta fallita: "..tostring(result))
             else
-                -- Response alone is not a confirmed quest; only the visible panel is used.
+                -- Una risposta non conferma la missione: si controlla il pannello visibile.
                 ex.nextQuest=os.clock()+6
                 log("Quest: richiesta inviata; attendo conferma GUI")
             end
@@ -4995,7 +4995,7 @@ do
         ex.questTicket=ex.questTicket+1
         ex.abilityTicket=ex.abilityTicket+1
         ex.lastMode=""
-        -- Cannot cancel an InvokeServer already sent; preserve the busy lock until response.
+        -- Non si può annullare un InvokeServer già inviato: conserva il blocco fino alla risposta.
         for _,key in ipairs(extra) do stopMode(key) end
         stopMode("questRequest")
         ex.status="Arrestato"
@@ -5299,7 +5299,7 @@ connect(RunService.Heartbeat,function(dt)
     if elapsed(dt,"inventory",1.2) and state.view=="Inventario" then safeRun("Inventario",inventoryRefresh) end
     if elapsed(dt,"perf",2) and cfg.reduceEffects then safeRun("Grafica",applyPerformance) end
 end)
--- Physics-phase update keeps movement and local collisions synchronized.
+-- La fase fisica sincronizza movimento e collisioni locali.
 connect(RunService.PreSimulation,function(dt)
     if not state.alive then return end
     if state.flight.velocity then
@@ -5332,8 +5332,8 @@ connect(UserInputService.InputBegan,function(i,processed)
         end
     end
 end)
--- Cleanup is idempotent. Independent protected steps prevent one failed UI refresh
--- from leaving constraints or connections alive.
+-- Pulizia idempotente. Operazioni protette e indipendenti impediscono che un errore
+-- nell'interfaccia lasci attivi vincoli fisici o connessioni.
 state.cleanup=function(destroyUI)
     if state.cleaned then return end
     state.cleaned=true;state.alive=false;state.generation=state.generation+1
