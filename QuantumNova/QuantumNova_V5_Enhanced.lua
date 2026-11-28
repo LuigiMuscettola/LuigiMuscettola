@@ -8,9 +8,9 @@ local Config={
     PauseOnRespawn=true, MountTimeout=20,
 }
 Config.Palette={
-    bg=Color3.fromRGB(13,14,23), panel=Color3.fromRGB(23,25,39),
-    item=Color3.fromRGB(33,36,54), accent=Color3.fromRGB(127,92,255),
-    accent2=Color3.fromRGB(53,189,235), text=Color3.fromRGB(240,241,252),
+    bg=Color3.fromRGB(14,16,25), panel=Color3.fromRGB(25,28,42),
+    item=Color3.fromRGB(37,41,58), accent=Color3.fromRGB(144,112,255),
+    accent2=Color3.fromRGB(66,197,228), text=Color3.fromRGB(240,241,252),
     muted=Color3.fromRGB(157,165,192), good=Color3.fromRGB(73,211,152),
     bad=Color3.fromRGB(242,97,122), stroke=Color3.fromRGB(52,55,78)
 }
@@ -55,9 +55,8 @@ Config.Defaults.flight=true
 Config.Defaults.flightSpeed=115
 Config.Defaults.flightBrake=9
 Config.Defaults.flightAvoid=true
-Config.Defaults.flightNoclip=true
 Config.NumericRanges={flightSpeed={15,220},flightBrake={3,15},statBatch={1,25},statReserve={0,10000},predictionLimit={0,.5},velocityTau={.03,1},maxLead={0,12},equipDelay={.05,.5},releaseDelay={.03,.2},standoff={2,10},pathInterval={.4,4},moveInterval={.08,.5},pathShift={4,20},engineInterval={.03,.2},manualTimeout={10,180},radius={20,1200},hitRange={3,15},attackInterval={.12,2},minHealth={5,75},recoverHealth={80,100},timeout={10,120},stuckTimeout={3,30},retryDelay={5,60},scanInterval={.25,5},markDistance={20,1000},markLimit={1,50},uiScale={.65,1.25},logLimit={10,100}}
-Config.AutomationKeys={autoQuest=true,questRequest=true,raidAssist=true,bountyAssist=true,autoRace3=true,autoRace4=true,eventWatch=true,autoStats=true,farm=true,fruit=true,chest=true,heal=true,notifyFruit=true,marker=true,fruitMarks=true,chestMarks=true,npcMarks=true}
+Config.AutomationKeys={flightNoclip=true,autoQuest=true,questRequest=true,raidAssist=true,bountyAssist=true,autoRace3=true,autoRace4=true,eventWatch=true,autoStats=true,farm=true,fruit=true,chest=true,heal=true,notifyFruit=true,marker=true,fruitMarks=true,chestMarks=true,npcMarks=true}
 -- Noclip is available, but opt-in after startup.
 Config.Defaults.flightNoclip=false
 -- 02 | FUNZIONI MATEMATICHE E TEST UNITARI INTEGRATI
@@ -3717,6 +3716,7 @@ local function button(parent,s,props,fn)
     return b
 end
 local function log(s)
+    if not state.alive then return end
     table.insert(state.log,1,os.date("%H:%M:%S").."  "..tostring(s))
     while #state.log>cfg.logLimit do table.remove(state.log) end
 end
@@ -3826,6 +3826,10 @@ local function toggle(parent,label,key,changed)
     end
     b=button(row,"OFF",{Size=UDim2.fromOffset(76,30),Position=UDim2.new(1,-86,.5,-15)},function()
         cfg[key]=not cfg[key]
+        if not cfg[key] and primaryModes[key] then
+            releaseAttack();state.flight.stop();state.target=nil;state.goal=nil;state.waypoints=nil;state.pendingAttack=nil
+            state.generation=state.generation+1
+        end
         if cfg[key] and primaryModes[key] then
             state.paused=false;state.pauseFromManual=false;state.lastSearch=-math.huge
             for other in pairs(primaryModes) do
@@ -4439,7 +4443,7 @@ local function tick(now)
             setTarget(nil,now)
             log("Destinazione raggiunta")
         else
-            state.mode="Navigazione manuale"
+            state.mode=cfg.flight and "Navigazione in volo" or "Navigazione a piedi"
             move(h,r,state.manualGoal,now)
         end
         return
@@ -4447,10 +4451,10 @@ local function tick(now)
     if not (cfg.farm or cfg.fruit or cfg.chest) then
         state.flight.stop();releaseAttack()
         if state.target or state.goal then state.flight.stop(h,r);setTarget(nil,now) end
-        state.mode="Idle";highlight.Enabled=false;return
+        state.mode="Inattivo";highlight.Enabled=false;return
     end
     if state.retreat then
-        state.mode="Retreating | "..math.floor(hp).."% HP";highlight.Enabled=false
+        state.mode="Ritirata | "..math.floor(hp).."% HP";highlight.Enabled=false
         local t=state.target
         if validTarget(t) and t.kind=="NPC" then
             local d=r.Position-t.part.Position;d=Vector3.new(d.X,0,d.Z)
@@ -4608,20 +4612,20 @@ do
     local seaIds = {[2753915549]=1,[4442272183]=2,[7449423635]=3}
     local events = {"Mirage Island","Kitsune Island","Prehistoric Island","Leviathan","Sea Beast","Terror Shark","Terrorshark","Factory","Core","Dough King","Cake Prince","rip_indra","Darkbeard","Order","Soul Reaper","Blue Gear","Frozen Dimension","Ship Raid"}
     local routes = {
-        {"Race V2","Second Sea; complete the Colosseum quest; speak to Alchemist; find the flowers; pay the in-game cost manually."},
-        {"Race V3","Have V2; speak to Arowe and complete the race-specific quest; confirm payment yourself."},
-        {"Race V4","Third Sea; V3; defeat rip_indra; obtain Mirror Fractal from Dough King; complete the Sealed King and Mirage/Blue Gear steps; unlock trials with other players."},
-        {"Raid awakening","Enter a raid with a valid chip, clear islands with the timer running, then speak to the awakening NPC and confirm the fragment cost."},
-        {"Cursed Dual Katana","Obtain Yama and Tushita; meet mastery and level requirements; finish their scroll trials."},
-        {"Yama / Tushita","Follow Elite Hunter and the hidden temple quests respectively; required conditions must be recognized by the server."},
-        {"Rengoku","Obtain the Hidden Key and locate the corresponding chest in Ice Castle."},
-        {"True Triple Katana","Obtain the three legendary swords and their mastery requirements; speak to the appropriate NPC."},
-        {"Shark Anchor","Obtain the required sea-event materials and Monster Magnet, then defeat the appropriate Terrorshark."},
-        {"Soul Guitar","Complete the Haunted Castle puzzle and acquire the requested materials."},
-        {"Godhuman / fighting styles","Meet the prerequisite style mastery, materials and currencies. Confirm any purchase manually."},
-        {"Draco / Dragon Dojo","Use the Dragon Dojo progression, belt quests and appropriate NPCs. Verify current conditions in game."},
-        {"Ghoul / Cyborg","Use their specific quest items and NPCs. Cyborg requires Order-related progression."},
-        {"Sea events","Use a boat and the normal event mechanics. The detector observes loaded objects only."},
+        {"Race V2","Secondo mare: completa la missione del Colosseo, parla con l'Alchimista, trova i fiori e conferma manualmente il costo nel gioco."},
+        {"Race V3","Ottieni V2, parla con Arowe, completa la missione specifica della razza e conferma il pagamento."},
+        {"Race V4","Terzo mare: ottieni V3, sconfiggi rip_indra, ottieni Mirror Fractal da Dough King, completa i passaggi Sealed King e Mirage/Blue Gear e sblocca le prove con altri giocatori."},
+        {"Raid awakening","Entra nel raid con un chip valido, completa le isole entro il tempo limite, parla con l'NPC del risveglio e conferma il costo in frammenti."},
+        {"Cursed Dual Katana","Ottieni Yama e Tushita, raggiungi i requisiti di livello e mastery e completa le prove delle pergamene."},
+        {"Yama / Tushita","Segui rispettivamente Elite Hunter e le missioni del tempio nascosto. Le condizioni devono risultare soddisfatte sul server."},
+        {"Rengoku","Ottieni Hidden Key e trova il forziere corrispondente in Ice Castle."},
+        {"True Triple Katana","Ottieni le tre spade leggendarie, raggiungi la mastery richiesta e parla con l'NPC appropriato."},
+        {"Shark Anchor","Ottieni i materiali degli eventi marini e Monster Magnet, quindi sconfiggi il Terrorshark richiesto."},
+        {"Soul Guitar","Completa il puzzle di Haunted Castle e raccogli i materiali richiesti."},
+        {"Godhuman / fighting styles","Raggiungi i requisiti di mastery degli stili, raccogli materiali e valuta. Conferma ogni acquisto manualmente."},
+        {"Draco / Dragon Dojo","Segui la progressione Dragon Dojo, le missioni delle cinture e gli NPC appropriati. Verifica i requisiti attuali nel gioco."},
+        {"Ghoul / Cyborg","Usa gli oggetti e gli NPC delle rispettive missioni. Cyborg richiede la progressione legata a Order."},
+        {"Sea events","Usa una barca e le normali meccaniche degli eventi. Il rilevatore osserva soltanto gli oggetti caricati."},
     }
     local ui = {}
     local ex = {nextScan=0,nextQuest=0,questBusy=false,questTicket=0,questFailures=0,
