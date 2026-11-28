@@ -1,4 +1,4 @@
--- Quantum Nova 4.2 | Runtime recovery and actionable diagnostics
+-- Quantum Nova 4.3 | Aero navigation and runtime recovery
 -- Uses standard Roblox APIs only. Includes optional experimental StartQuest/AddPoint requests; no server-side bypass.
 -- Game-specific automation is limited to objects and actions exposed to the client.
 -- All automation is disabled on launch. No telemetry or external code downloads.
@@ -3450,6 +3450,10 @@ cfg.autoStats=false
 cfg.statName="Melee"
 cfg.statBatch=1
 cfg.statReserve=0
+cfg.flight=true
+cfg.flightSpeed=95
+cfg.flightBrake=9
+cfg.flightAvoid=true
 local defaults=table.clone(cfg)
 local expansion
 local state={alive=true,target=nil,targetSince=0,lastAttack=0,lastMove=0,
@@ -3476,6 +3480,111 @@ state.engineBusy=false
 state.lastScanCount=0
 state.lastScanReject={}
 state.engineCycles=0
+-- One controller for all movement modes. Constraints are local and never anchor the character.
+state.flight={root=nil,hum=nil,attachment=nil,velocity=nil,goal=nil,untilTime=0,
+    smoothed=Vector3.new(0,0,0),status="Pronto",obstacles=0,detour=nil,detourUntil=0}
+do
+    local F=state.flight
+    local zero=Vector3.new(0,0,0)
+    function F.stop(h,r)
+        F.goal=nil;F.untilTime=0;F.detour=nil;F.detourUntil=0;F.smoothed=zero
+        local had=F.velocity~=nil
+        if F.velocity then F.velocity:Destroy();F.velocity=nil end
+        if F.attachment then F.attachment:Destroy();F.attachment=nil end
+        if had and F.root and F.root.Parent then
+            pcall(function() F.root.AssemblyLinearVelocity=zero end)
+        end
+        F.root=nil;F.hum=nil
+        if h and r and h.Parent then h:MoveTo(r.Position) end
+        F.status="Fermo"
+    end
+    function F.command(h,r,goal,now)
+        if not r or not h or not goal or r.Anchored or h.SeatPart then
+            F.stop(h,r);F.status="Volo indisponibile (ancorato o seduto)";return false
+        end
+        if F.root~=r or not F.velocity or not F.velocity.Parent then
+            F.stop()
+            local a=Instance.new("Attachment")
+            a.Name="NovaFlightAttachment";a.Parent=r
+            F.attachment=a;F.root=r;F.hum=h
+            local v=Instance.new("LinearVelocity")
+            F.velocity=v
+            v.Name="NovaFlightVelocity"
+            v.Attachment0=a
+            v.RelativeTo=Enum.ActuatorRelativeTo.World
+            v.VelocityConstraintMode=Enum.VelocityConstraintMode.Vector
+            v.MaxForce=math.max(10000,r.AssemblyMass*(workspace.Gravity+900))
+            v.VectorVelocity=zero
+            v.Parent=r
+            h:MoveTo(r.Position)
+        end
+        if F.goal and (goal-F.goal).Magnitude>20 then F.detour=nil;F.detourUntil=0 end
+        F.goal=goal;F.untilTime=now+.8
+        return true
+    end
+    function F.hold(h,r,now)
+        if cfg.flight then
+            if F.command(h,r,r.Position,now) then
+                F.detour=nil;F.detourUntil=0;F.smoothed=zero;F.velocity.VectorVelocity=zero;F.status="Hover"
+            end
+        else
+            F.stop(h,r)
+        end
+    end
+    function F.step(dt)
+        if not F.velocity then return end
+        local r,h=F.root,F.hum
+        local now=os.clock()
+        if not state.alive or state.paused or not cfg.flight or now>F.untilTime
+            or not r or not r.Parent or not h or not h.Parent or h.Health<=0
+            or r.Anchored or h.SeatPart or r.Parent~=player.Character then
+            F.stop();return
+        end
+        if not F.goal then F.stop();return end
+        local delta=F.goal-r.Position
+        local dist=delta.Magnitude
+        if dist<.35 then
+            F.smoothed=zero;F.velocity.VectorVelocity=zero;F.status="Hover";return
+        end
+        local destination=F.goal
+        local params
+        if cfg.flightAvoid then
+            params=RaycastParams.new()
+            params.FilterType=Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances={r.Parent}
+            params.RespectCanCollide=true
+            if F.detour and now<F.detourUntil and (F.detour-r.Position).Magnitude>2 then
+                destination=F.detour
+            else
+                F.detour=nil
+                local probe=math.min(dist,math.max(10,cfg.flightSpeed*.32))
+                local hit=workspace:Raycast(r.Position,delta.Unit*probe,params)
+                if hit and (F.goal-hit.Position).Magnitude>3 then
+                    F.obstacles=F.obstacles+1
+                    -- Try open space above or to either side, never disable collisions.
+                    local right=delta.Unit:Cross(Vector3.new(0,1,0))
+                    if right.Magnitude<.1 then right=Vector3.new(1,0,0) else right=right.Unit end
+                    for _,offset in ipairs({Vector3.new(0,15,0),right*15,-right*15,Vector3.new(0,-10,0)}) do
+                        if not workspace:Raycast(r.Position,offset,params) then
+                            F.detour=r.Position+offset;F.detourUntil=now+1.5;break
+                        end
+                    end
+                    if not F.detour then
+                        F.smoothed=zero;F.velocity.VectorVelocity=zero;F.status="Ostacolo: in attesa";return
+                    end
+                    destination=F.detour
+                end
+            end
+        end
+        local d=destination-r.Position
+        local length=d.Magnitude
+        local speed=math.min(cfg.flightSpeed,math.max(1,length*cfg.flightBrake),math.sqrt(2*200*length))
+        local desired=length>.2 and d.Unit*speed or zero
+        F.smoothed=F.smoothed:Lerp(desired,1-math.exp(-math.clamp(dt,0,.1)*12))
+        F.velocity.VectorVelocity=F.smoothed
+        F.status=F.detour and "Volo: deviazione" or "Volo: "..math.floor(dist).." studs"
+    end
+end
 local function releaseAttack()
     local tool=state.lastTool
     if tool and tool.Parent then pcall(function() tool:Deactivate() end) end
@@ -3541,7 +3650,7 @@ corner(logo,12)
 make("UIGradient",logo,{Color=ColorSequence.new(C.accent,C.accent2),Rotation=35})
 text(logo,"Q",{Size=UDim2.fromScale(1,1),TextSize=25,Font=Enum.Font.GothamBlack,TextXAlignment=Enum.TextXAlignment.Center})
 text(header,"QUANTUM NOVA",{Position=UDim2.fromOffset(63,9),Size=UDim2.new(1,-265,0,24),TextSize=19,Font=Enum.Font.GothamBold})
-text(header,"V4.2  /  RUNTIME RECOVERY",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
+text(header,"V4.3  /  AERO NAVIGATION",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
 local mini=button(gui,"Q  NOVA",{Size=UDim2.fromOffset(90,42),Position=UDim2.fromOffset(10,90),Visible=false,BackgroundColor3=C.accent},function() window.Visible=true;gui:FindFirstChild("Mini").Visible=false end)
 mini.Name="Mini"
 button(header,"–",{Size=UDim2.fromOffset(34,34),Position=UDim2.new(1,-78,0,13)},function() window.Visible=false;mini.Visible=true end)
@@ -3631,7 +3740,7 @@ local function toggle(parent,label,key,changed)
                 end
             end
             state.target=nil;state.goal=nil;state.waypoints=nil
-            state.pendingAttack=nil;releaseAttack()
+            state.pendingAttack=nil;releaseAttack();state.flight.stop()
             state.generation=state.generation+1
         end
         refresh()
@@ -3684,7 +3793,7 @@ local function stopAll()
     local c=player.Character
     local h=c and c:FindFirstChildOfClass("Humanoid")
     local r=c and c:FindFirstChild("HumanoidRootPart")
-    if h and r then h:MoveTo(r.Position) end
+    if h and r then state.flight.stop(h,r) end
     log("Arresto generale")
 end
 local hero=block(dash,"Panoramica",104)
@@ -3693,7 +3802,7 @@ corner(g,3);make("UIGradient",g,{Color=ColorSequence.new(C.accent,C.accent2)})
 text(hero,"Controllo sessione",{Position=UDim2.fromOffset(12,12),Size=UDim2.new(1,-24,0,23),Font=Enum.Font.GothamBold,TextSize=18})
 local summary=text(hero,"Pronto",{Position=UDim2.fromOffset(12,40),Size=UDim2.new(1,-24,0,53),TextWrapped=true,TextColor3=C.muted,TextSize=12})
 action(dash,"Arresta tutte le automazioni","STOP",stopAll,C.bad)
-local pauseButton=action(dash,"Pausa / riprendi","PAUSA",function() state.paused=not state.paused;state.pauseFromManual=false;log(state.paused and "Pausa" or "Ripresa") end)
+local pauseButton=action(dash,"Pausa / riprendi","PAUSA",function() state.paused=not state.paused;state.pauseFromManual=false;if state.paused then state.flight.stop() end;log(state.paused and "Pausa" or "Ripresa") end)
 action(dash,"Azzera contatori","RESET",function() state.kills=0;state.attacks=0;state.errors=0;state.started=os.clock() end)
 note(dash,"Le automazioni partono disattivate. Il server mantiene il controllo su danni, ricompense e missioni.")
 toggle(farmPage,"Farm NPC visibili","farm")
@@ -3742,7 +3851,7 @@ action(travel,"Leggi posizione attuale","LEGGI",function()
     local r=rootPart();if not r then return end
     xBox.Text=string.format("%.1f",r.Position.X);yBox.Text=string.format("%.1f",r.Position.Y);zBox.Text=string.format("%.1f",r.Position.Z)
 end)
-action(travel,"Cammina alla destinazione","VAI",function()
+action(travel,"Vola alla destinazione","VAI",function()
     local goal=readCoordinates();if not goal then notify("Coordinate non valide");return end
     state.target=nil;state.goal=nil;state.waypoints=nil;state.generation=state.generation+1;state.paused=false;state.manualGoal=goal;state.manualStarted=os.clock()
 end)
@@ -3757,7 +3866,7 @@ action(travel,"Torna all'ultima posizione","TORNA",function()
 end)
 action(travel,"Annulla navigazione","ANNULLA",function()
     state.manualGoal=nil;state.goal=nil;state.waypoints=nil;state.generation=state.generation+1
-    local c=player.Character;local r=rootPart();local h=c and c:FindFirstChildOfClass("Humanoid");if h and r then h:MoveTo(r.Position) end
+    local c=player.Character;local r=rootPart();local h=c and c:FindFirstChildOfClass("Humanoid");if h and r then state.flight.stop(h,r) end
 end)
 local confirmRejoin=0
 action(travel,"Rientra nel gioco (doppio tocco)","RIENTRA",function()
@@ -3811,7 +3920,12 @@ toggle(perf,"Riduci effetti post-processing","reduceEffects",applyPerformance)
 toggle(perf,"Disattiva ombre locali","lowShadows",applyPerformance)
 toggle(perf,"Mostra statistiche nel footer","showStats")
 note(perf,"Le modifiche grafiche sono locali e vengono ripristinate quando chiudi il pannello.")
-toggle(settings,"Pathfinding","path")
+toggle(settings,"Volo automatico","flight",function(on) if not on then state.flight.stop() end end)
+field(settings,"Velocita volo (stud/s)","flightSpeed",true,15,180)
+field(settings,"Frenata volo","flightBrake",true,3,15)
+toggle(settings,"Evita ostacoli in volo","flightAvoid")
+toggle(settings,"Pathfinding (solo camminata)","path")
+note(settings,"Volo ON: motore 3D per navigazione e automazioni. Il server puo correggere o rifiutare gli spostamenti.",68)
 field(settings,"Raggio scansione (studs)","radius",true,20,1200)
 field(settings,"Intervallo scansione (s)","scanInterval",true,.25,5)
 field(settings,"Timeout bersaglio (s)","timeout",true,10,120)
@@ -3832,7 +3946,7 @@ action(diagnostics,"Importa configurazione JSON","IMPORTA",function()
     local ok,data=pcall(function() return HttpService:JSONDecode(exportBox.Text) end)
     if not ok or type(data)~="table" then notify("JSON non valido");return end
     stopAll()
-    local numericRanges={statBatch={1,25},statReserve={0,10000},predictionLimit={0,.5},velocityTau={.03,1},maxLead={0,12},equipDelay={.05,.5},releaseDelay={.03,.2},standoff={2,10},pathInterval={.4,4},moveInterval={.08,.5},pathShift={4,20},engineInterval={.03,.2},manualTimeout={10,180},radius={20,1200},hitRange={3,15},attackInterval={.12,2},minHealth={5,75},recoverHealth={80,100},timeout={10,120},stuckTimeout={3,30},retryDelay={5,60},scanInterval={.25,5},markDistance={20,1000},markLimit={1,50},uiScale={.65,1.25},logLimit={10,100}}
+    local numericRanges={flightSpeed={15,180},flightBrake={3,15},statBatch={1,25},statReserve={0,10000},predictionLimit={0,.5},velocityTau={.03,1},maxLead={0,12},equipDelay={.05,.5},releaseDelay={.03,.2},standoff={2,10},pathInterval={.4,4},moveInterval={.08,.5},pathShift={4,20},engineInterval={.03,.2},manualTimeout={10,180},radius={20,1200},hitRange={3,15},attackInterval={.12,2},minHealth={5,75},recoverHealth={80,100},timeout={10,120},stuckTimeout={3,30},retryDelay={5,60},scanInterval={.25,5},markDistance={20,1000},markLimit={1,50},uiScale={.65,1.25},logLimit={10,100}}
     local noAuto={autoQuest=true,questRequest=true,raidAssist=true,bountyAssist=true,autoRace3=true,autoRace4=true,eventWatch=true,autoStats=true,farm=true,fruit=true,chest=true,heal=true,notifyFruit=true,marker=true,fruitMarks=true,chestMarks=true,npcMarks=true}
     for k,v in pairs(data) do
         if defaults[k]~=nil and type(v)==type(defaults[k]) and not noAuto[k] then
@@ -3865,7 +3979,7 @@ field(advanced,"Intervallo motore (s)","engineInterval",true,.03,.2)
 field(advanced,"Timeout navigazione manuale","manualTimeout",true,10,180)
 toggle(advanced,"Adatta scansione a FPS bassi","adaptive")
 toggle(advanced,"Pausa con input movimento","manualOverride")
-note(advanced,"La predizione riguarda la navigazione verso NPC. Non altera hitbox, proiettili, velocita del personaggio o cooldown del server.",70)
+note(advanced,"La predizione riguarda la navigazione verso NPC. Il volo modifica solo il movimento locale; hitbox, proiettili e cooldown del server non sono alterati.",70)
 local metricsPanel=block(telemetry,"Misure motore",225)
 local metricsText=text(metricsPanel,"Pronto",{Position=UDim2.fromOffset(12,10),Size=UDim2.new(1,-24,1,-20),TextYAlignment=Enum.TextYAlignment.Top,TextSize=12,TextWrapped=true})
 toggle(telemetry,"Aggiorna telemetria","showMetrics")
@@ -4047,6 +4161,8 @@ local function equip(c,h)
 end
 local function move(h,r,goal,now)
     if not goal then return end
+    if cfg.flight then state.goal=goal;state.flight.command(h,r,goal,now);return end
+    if state.flight.velocity then state.flight.stop(h,r) end
     if not state.goal or (state.goal-goal).Magnitude>cfg.pathShift then state.goal=goal;state.waypoints=nil;state.pathAt=0;state.generation=state.generation+1 end
     if cfg.path and not state.pathBusy and now-state.pathAt>cfg.pathInterval and (r.Position-goal).Magnitude>12 then
         state.pathAt=now;state.pathBusy=true
@@ -4130,18 +4246,18 @@ end
 local function tick(now)
     settleAttack(now)
     local c,h,r=character()
-    if not c then releaseAttack();state.pendingAttack=nil;state.mode="Attesa respawn";highlight.Enabled=false;return end
+    if not c then state.flight.stop();releaseAttack();state.pendingAttack=nil;state.mode="Attesa respawn";highlight.Enabled=false;return end
     if c~=state.char then state.char=c;setTarget(nil,now);state.retreat=false;state.lastSearch=0 end
     local hp=100*h.Health/math.max(h.MaxHealth,1)
-    if state.paused then releaseAttack();if not state.pauseFromManual then h:MoveTo(r.Position) end;state.mode=state.pauseFromManual and "Pausa input manuale: premi RIPRENDI" or "Pausa: premi RIPRENDI";highlight.Enabled=false;return end
+    if state.paused then releaseAttack();state.flight.stop();if not state.pauseFromManual then state.flight.stop(h,r) end;state.mode=state.pauseFromManual and "Pausa input manuale: premi RIPRENDI" or "Pausa: premi RIPRENDI";highlight.Enabled=false;return end
     if not cfg.heal then state.retreat=false else state.retreat=MathCore.healthMode(state.retreat,hp,cfg.minHealth,cfg.recoverHealth) end
     if state.manualGoal and now-state.manualStarted>cfg.manualTimeout then
-        state.manualGoal=nil;setTarget(nil,now);h:MoveTo(r.Position);log("Timeout navigazione")
+        state.manualGoal=nil;setTarget(nil,now);state.flight.stop(h,r);log("Timeout navigazione")
     end
     if state.manualGoal and not state.retreat then
         if (r.Position-state.manualGoal).Magnitude<4 then
             state.manualGoal=nil
-            h:MoveTo(r.Position)
+            state.flight.stop(h,r)
             setTarget(nil,now)
             log("Destinazione raggiunta")
         else
@@ -4151,8 +4267,8 @@ local function tick(now)
         return
     end
     if not (cfg.farm or cfg.fruit or cfg.chest) then
-        releaseAttack()
-        if state.target or state.goal then h:MoveTo(r.Position);setTarget(nil,now) end
+        state.flight.stop();releaseAttack()
+        if state.target or state.goal then state.flight.stop(h,r);setTarget(nil,now) end
         state.mode="Idle";highlight.Enabled=false;return
     end
     if state.retreat then
@@ -4160,8 +4276,8 @@ local function tick(now)
         local t=state.target
         if validTarget(t) and t.kind=="NPC" then
             local d=r.Position-t.part.Position;d=Vector3.new(d.X,0,d.Z)
-            if d.Magnitude<45 then move(h,r,r.Position+(d.Magnitude>0.1 and d.Unit or Vector3.new(1,0,0))*35,now) else h:MoveTo(r.Position) end
-        else h:MoveTo(r.Position) end
+            if d.Magnitude<45 then move(h,r,r.Position+(d.Magnitude>0.1 and d.Unit or Vector3.new(1,0,0))*35,now) else state.flight.stop(h,r) end
+        else state.flight.stop(h,r) end
         return
     end
     local t=state.target
@@ -4192,20 +4308,20 @@ local function tick(now)
     if not t then
         local rejects=state.lastScanReject
         state.mode=string.format("Nessun target | Candidati %d | Fuori raggio %d | In attesa %d",state.lastScanCount,rejects.range or 0,rejects.excluded or 0)
-        highlight.Enabled=false;h:MoveTo(r.Position);return
+        highlight.Enabled=false;state.flight.stop(h,r);return
     end
     highlight.Adornee=t.obj;highlight.Enabled=cfg.marker
     local dist=(t.part.Position-r.Position).Magnitude
     state.mode=t.kind.." | "..t.obj.Name.." | "..math.floor(dist).." st"
     if t.kind=="NPC" and dist<=cfg.hitRange then
-        h:MoveTo(r.Position)
+        state.flight.hold(h,r,now)
         if not attackNPC(c,h,r,t,now) then
             state.mode=state.lastAttackReason
             if cfg.lineOfSight and not clearLine(r,t.part,t.obj) then move(h,r,t.part.Position,now) end
         end
     elseif t.kind~="NPC" and dist<3 then
         -- No simulated touch or prompt bypass. Normal game pickup rules apply.
-        h:MoveTo(t.part.Position)
+        move(h,r,t.part.Position,now)
         if now-state.targetSince>5 then state.excluded[t.obj]=now+15;setTarget(nil,now) end
     else
         local goal=predictedPosition(t,r,now)
@@ -4427,7 +4543,7 @@ do
         releaseAttack()
         state.pendingAttack=nil
         if state.target or state.goal then setTarget(nil,os.clock()) end
-        if h and r then h:MoveTo(r.Position) end
+        if h and r then state.flight.stop(h,r) end
     end
     local function stopMode(key)
         cfg[key]=false
@@ -4580,7 +4696,7 @@ do
         end
         if not state.target or state.target.obj~=model then setTarget({obj=model,part=part,hum=hum,kind="Player"},now) end
         if distance<=cfg.hitRange then
-            h:MoveTo(r.Position)
+            state.flight.hold(h,r,now)
             attackNPC(c,h,r,state.target,now)
         else
             local d=part.Position-r.Position
@@ -4732,11 +4848,11 @@ do
         end
         if cfg.autoRace3 then tryAbility(c,h,now,"autoRace3",{"Race Ability","Race V3","Last Resort","Water Body","Heavenly Blood","Heightened Senses","Energy Core","Agility"}) end
         statsTick(now)
-        if ex.abilityBusy then setStatus("Race: attivazione in corso");return true end
+        if ex.abilityBusy then state.flight.stop(h,r);setStatus("Race: attivazione in corso");return true end
         local mode=cfg.raidAssist and "raid" or cfg.autoQuest and "quest" or cfg.bountyAssist and "bounty" or ""
         if ex.lastMode~=mode then
             setTarget(nil,now);ex.lastMode=mode
-            if mode=="" then h:MoveTo(r.Position) end
+            if mode=="" then state.flight.stop(h,r) end
         end
         if mode=="raid" then raidTick(now,c,h,r);return true end
         if mode=="quest" then questTick(now,c,h,r);return true end
@@ -4927,7 +5043,9 @@ local function runtimeReport()
     for _,key in ipairs({"farm","fruit","chest","autoQuest","raidAssist","bountyAssist","autoRace3","autoRace4","autoStats","eventWatch"}) do
         if cfg[key] then table.insert(modes,key) end
     end
-    local lines={"V4.2 | PlaceId "..tostring(game.PlaceId),
+    local lines={"V4.3 | PlaceId "..tostring(game.PlaceId),
+        "Movimento: "..(cfg.flight and "VOLO" or "CAMMINATA").." | "..state.flight.status,
+        "Ostacoli volo: "..state.flight.obstacles,
         "Cicli motore: "..state.engineCycles.." | Errori: "..state.errors,
         "Attivi: "..(#modes>0 and table.concat(modes,", ") or "nessuno"),
         "Stato: "..state.mode,
@@ -4986,7 +5104,10 @@ connect(RunService.Heartbeat,function(dt)
             if not expansion.tick(now) then tick(now) end
         end)
         state.engineBusy=false
-        if not ok then state.mode="Errore motore: vedi Diagnostica";releaseAttack() end
+        if not ok then state.mode="Errore motore: vedi Diagnostica";state.flight.stop();releaseAttack() end
+    end
+    if state.flight.velocity then
+        if not safeRun("Volo",function() state.flight.step(dt) end) then state.flight.stop() end
     end
     if elapsed(dt,"ui",.25) then safeRun("Interfaccia",updateUI) end
     if elapsed(dt,"marks",.75) then safeRun("Indicatori",markerRefresh) end
@@ -5000,7 +5121,7 @@ connect(UserInputService.InputBegan,function(i,processed)
     if key==Enum.KeyCode.W or key==Enum.KeyCode.A or key==Enum.KeyCode.S or key==Enum.KeyCode.D or key==Enum.KeyCode.Space then
         if cfg.farm or cfg.fruit or cfg.chest or state.manualGoal or expansion.isActive() then
             state.paused=true;state.pauseFromManual=true;state.lastManualInput=os.clock();state.metrics.manualStops=state.metrics.manualStops+1
-            releaseAttack()
+            releaseAttack();state.flight.stop()
         end
     end
 end)
@@ -5011,5 +5132,5 @@ connect(gui.Destroying,function()
     for _,c in ipairs(conns) do c:Disconnect() end
     table.clear(conns)
 end)
-log("Quantum Nova 4.2 caricato; automazioni OFF")
-print("[QuantumNova] V4.2 loaded. All automation starts OFF.")
+log("Quantum Nova 4.3 caricato; volo ON, automazioni OFF")
+print("[QuantumNova] V4.3 loaded. All automation starts OFF.")
