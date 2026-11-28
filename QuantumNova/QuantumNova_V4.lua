@@ -1,4 +1,4 @@
--- Quantum Nova 4.3 | Aero navigation and runtime recovery
+-- Quantum Nova 4.4 | Aero phase and lifecycle improvements
 -- Uses standard Roblox APIs only. Includes optional experimental StartQuest/AddPoint requests; no server-side bypass.
 -- Game-specific automation is limited to objects and actions exposed to the client.
 -- All automation is disabled on launch. No telemetry or external code downloads.
@@ -3451,9 +3451,10 @@ cfg.statName="Melee"
 cfg.statBatch=1
 cfg.statReserve=0
 cfg.flight=true
-cfg.flightSpeed=95
+cfg.flightSpeed=115
 cfg.flightBrake=9
 cfg.flightAvoid=true
+cfg.flightNoclip=true
 local defaults=table.clone(cfg)
 local expansion
 local state={alive=true,target=nil,targetSince=0,lastAttack=0,lastMove=0,
@@ -3482,11 +3483,51 @@ state.lastScanReject={}
 state.engineCycles=0
 -- One controller for all movement modes. Constraints are local and never anchor the character.
 state.flight={root=nil,hum=nil,attachment=nil,velocity=nil,goal=nil,untilTime=0,
-    smoothed=Vector3.new(0,0,0),status="Pronto",obstacles=0,detour=nil,detourUntil=0}
+    smoothed=Vector3.new(0,0,0),status="Pronto",obstacles=0,detour=nil,detourUntil=0,
+    collisionParts={},collisionOwner=nil,nextPartScan=0,collisionCount=0}
 do
     local F=state.flight
     local zero=Vector3.new(0,0,0)
+    -- Keep original values, including false, and only touch our character.
+    function F.restoreCollisions()
+        for part,original in pairs(F.collisionParts) do
+            pcall(function() part.CanCollide=original end)
+        end
+        table.clear(F.collisionParts)
+        F.collisionOwner=nil;F.nextPartScan=0;F.collisionCount=0
+    end
+    function F.syncCollisions(now)
+        local owner=F.root and F.root.Parent
+        if not cfg.flightNoclip or not cfg.flight or not owner or owner~=player.Character then
+            if F.collisionOwner then F.restoreCollisions() end
+            return
+        end
+        if F.collisionOwner~=owner then
+            F.restoreCollisions()
+            F.collisionOwner=owner
+        end
+        if now>=F.nextPartScan then
+            F.nextPartScan=now+.25
+            for _,part in ipairs(owner:GetDescendants()) do
+                if part:IsA("BasePart") and F.collisionParts[part]==nil then
+                    F.collisionParts[part]=part.CanCollide
+                end
+            end
+        end
+        local count=0
+        for part,original in pairs(F.collisionParts) do
+            if not part:IsDescendantOf(owner) then
+                pcall(function() part.CanCollide=original end)
+                F.collisionParts[part]=nil
+            else
+                if part.CanCollide then part.CanCollide=false end
+                count=count+1
+            end
+        end
+        F.collisionCount=count
+    end
     function F.stop(h,r)
+        F.restoreCollisions()
         F.goal=nil;F.untilTime=0;F.detour=nil;F.detourUntil=0;F.smoothed=zero
         local had=F.velocity~=nil
         if F.velocity then F.velocity:Destroy();F.velocity=nil end
@@ -3520,6 +3561,7 @@ do
         end
         if F.goal and (goal-F.goal).Magnitude>20 then F.detour=nil;F.detourUntil=0 end
         F.goal=goal;F.untilTime=now+.8
+        F.syncCollisions(now)
         return true
     end
     function F.hold(h,r,now)
@@ -3535,12 +3577,13 @@ do
         if not F.velocity then return end
         local r,h=F.root,F.hum
         local now=os.clock()
-        if not state.alive or state.paused or not cfg.flight or now>F.untilTime
+        if not state.alive or state.paused or not cfg.flight or not F.velocity.Parent or now>F.untilTime
             or not r or not r.Parent or not h or not h.Parent or h.Health<=0
             or r.Anchored or h.SeatPart or r.Parent~=player.Character then
             F.stop();return
         end
         if not F.goal then F.stop();return end
+        F.syncCollisions(now)
         local delta=F.goal-r.Position
         local dist=delta.Magnitude
         if dist<.35 then
@@ -3548,7 +3591,7 @@ do
         end
         local destination=F.goal
         local params
-        if cfg.flightAvoid then
+        if cfg.flightAvoid and not cfg.flightNoclip then
             params=RaycastParams.new()
             params.FilterType=Enum.RaycastFilterType.Exclude
             params.FilterDescendantsInstances={r.Parent}
@@ -3561,7 +3604,7 @@ do
                 local hit=workspace:Raycast(r.Position,delta.Unit*probe,params)
                 if hit and (F.goal-hit.Position).Magnitude>3 then
                     F.obstacles=F.obstacles+1
-                    -- Try open space above or to either side, never disable collisions.
+                    -- Normal flight only: try open space above or to either side.
                     local right=delta.Unit:Cross(Vector3.new(0,1,0))
                     if right.Magnitude<.1 then right=Vector3.new(1,0,0) else right=right.Unit end
                     for _,offset in ipairs({Vector3.new(0,15,0),right*15,-right*15,Vector3.new(0,-10,0)}) do
@@ -3575,6 +3618,8 @@ do
                     destination=F.detour
                 end
             end
+        else
+            F.detour=nil;F.detourUntil=0
         end
         local d=destination-r.Position
         local length=d.Magnitude
@@ -3582,7 +3627,7 @@ do
         local desired=length>.2 and d.Unit*speed or zero
         F.smoothed=F.smoothed:Lerp(desired,1-math.exp(-math.clamp(dt,0,.1)*12))
         F.velocity.VectorVelocity=F.smoothed
-        F.status=F.detour and "Volo: deviazione" or "Volo: "..math.floor(dist).." studs"
+        F.status=F.detour and "Volo: deviazione" or ((cfg.flightNoclip and "Volo Noclip: " or "Volo: ")..math.floor(dist).." studs")
     end
 end
 local function releaseAttack()
@@ -3650,7 +3695,7 @@ corner(logo,12)
 make("UIGradient",logo,{Color=ColorSequence.new(C.accent,C.accent2),Rotation=35})
 text(logo,"Q",{Size=UDim2.fromScale(1,1),TextSize=25,Font=Enum.Font.GothamBlack,TextXAlignment=Enum.TextXAlignment.Center})
 text(header,"QUANTUM NOVA",{Position=UDim2.fromOffset(63,9),Size=UDim2.new(1,-265,0,24),TextSize=19,Font=Enum.Font.GothamBold})
-text(header,"V4.3  /  AERO NAVIGATION",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
+text(header,"V4.4  /  AERO PHASE",{Position=UDim2.fromOffset(64,34),Size=UDim2.new(1,-265,0,17),TextSize=10,TextColor3=C.muted})
 local mini=button(gui,"Q  NOVA",{Size=UDim2.fromOffset(90,42),Position=UDim2.fromOffset(10,90),Visible=false,BackgroundColor3=C.accent},function() window.Visible=true;gui:FindFirstChild("Mini").Visible=false end)
 mini.Name="Mini"
 button(header,"–",{Size=UDim2.fromOffset(34,34),Position=UDim2.new(1,-78,0,13)},function() window.Visible=false;mini.Visible=true end)
@@ -3793,7 +3838,7 @@ local function stopAll()
     local c=player.Character
     local h=c and c:FindFirstChildOfClass("Humanoid")
     local r=c and c:FindFirstChild("HumanoidRootPart")
-    if h and r then state.flight.stop(h,r) end
+    state.flight.stop(h,r)
     log("Arresto generale")
 end
 local hero=block(dash,"Panoramica",104)
@@ -3921,11 +3966,15 @@ toggle(perf,"Disattiva ombre locali","lowShadows",applyPerformance)
 toggle(perf,"Mostra statistiche nel footer","showStats")
 note(perf,"Le modifiche grafiche sono locali e vengono ripristinate quando chiudi il pannello.")
 toggle(settings,"Volo automatico","flight",function(on) if not on then state.flight.stop() end end)
-field(settings,"Velocita volo (stud/s)","flightSpeed",true,15,180)
+field(settings,"Velocita volo (stud/s)","flightSpeed",true,15,220)
 field(settings,"Frenata volo","flightBrake",true,3,15)
-toggle(settings,"Evita ostacoli in volo","flightAvoid")
+toggle(settings,"Noclip durante il volo","flightNoclip",function(on)
+    state.flight.detour=nil;state.flight.detourUntil=0
+    if not on then state.flight.restoreCollisions() end
+end)
+toggle(settings,"Evita ostacoli (Noclip OFF)","flightAvoid")
 toggle(settings,"Pathfinding (solo camminata)","path")
-note(settings,"Volo ON: motore 3D per navigazione e automazioni. Il server puo correggere o rifiutare gli spostamenti.",68)
+note(settings,"Noclip agisce solo sulle parti del tuo personaggio durante il volo. STOP e pausa ripristinano le collisioni. Il server puo rifiutare il movimento.",80)
 field(settings,"Raggio scansione (studs)","radius",true,20,1200)
 field(settings,"Intervallo scansione (s)","scanInterval",true,.25,5)
 field(settings,"Timeout bersaglio (s)","timeout",true,10,120)
@@ -3946,7 +3995,7 @@ action(diagnostics,"Importa configurazione JSON","IMPORTA",function()
     local ok,data=pcall(function() return HttpService:JSONDecode(exportBox.Text) end)
     if not ok or type(data)~="table" then notify("JSON non valido");return end
     stopAll()
-    local numericRanges={flightSpeed={15,180},flightBrake={3,15},statBatch={1,25},statReserve={0,10000},predictionLimit={0,.5},velocityTau={.03,1},maxLead={0,12},equipDelay={.05,.5},releaseDelay={.03,.2},standoff={2,10},pathInterval={.4,4},moveInterval={.08,.5},pathShift={4,20},engineInterval={.03,.2},manualTimeout={10,180},radius={20,1200},hitRange={3,15},attackInterval={.12,2},minHealth={5,75},recoverHealth={80,100},timeout={10,120},stuckTimeout={3,30},retryDelay={5,60},scanInterval={.25,5},markDistance={20,1000},markLimit={1,50},uiScale={.65,1.25},logLimit={10,100}}
+    local numericRanges={flightSpeed={15,220},flightBrake={3,15},statBatch={1,25},statReserve={0,10000},predictionLimit={0,.5},velocityTau={.03,1},maxLead={0,12},equipDelay={.05,.5},releaseDelay={.03,.2},standoff={2,10},pathInterval={.4,4},moveInterval={.08,.5},pathShift={4,20},engineInterval={.03,.2},manualTimeout={10,180},radius={20,1200},hitRange={3,15},attackInterval={.12,2},minHealth={5,75},recoverHealth={80,100},timeout={10,120},stuckTimeout={3,30},retryDelay={5,60},scanInterval={.25,5},markDistance={20,1000},markLimit={1,50},uiScale={.65,1.25},logLimit={10,100}}
     local noAuto={autoQuest=true,questRequest=true,raidAssist=true,bountyAssist=true,autoRace3=true,autoRace4=true,eventWatch=true,autoStats=true,farm=true,fruit=true,chest=true,heal=true,notifyFruit=true,marker=true,fruitMarks=true,chestMarks=true,npcMarks=true}
     for k,v in pairs(data) do
         if defaults[k]~=nil and type(v)==type(defaults[k]) and not noAuto[k] then
@@ -5043,8 +5092,10 @@ local function runtimeReport()
     for _,key in ipairs({"farm","fruit","chest","autoQuest","raidAssist","bountyAssist","autoRace3","autoRace4","autoStats","eventWatch"}) do
         if cfg[key] then table.insert(modes,key) end
     end
-    local lines={"V4.3 | PlaceId "..tostring(game.PlaceId),
+    local lines={"V4.4 | PlaceId "..tostring(game.PlaceId),
         "Movimento: "..(cfg.flight and "VOLO" or "CAMMINATA").." | "..state.flight.status,
+        "Noclip: "..(cfg.flightNoclip and "ON" or "OFF").." | Parti gestite: "..state.flight.collisionCount,
+        "Velocita reale: "..(r and math.floor(r.AssemblyLinearVelocity.Magnitude) or 0).." stud/s",
         "Ostacoli volo: "..state.flight.obstacles,
         "Cicli motore: "..state.engineCycles.." | Errori: "..state.errors,
         "Attivi: "..(#modes>0 and table.concat(modes,", ") or "nessuno"),
@@ -5106,14 +5157,25 @@ connect(RunService.Heartbeat,function(dt)
         state.engineBusy=false
         if not ok then state.mode="Errore motore: vedi Diagnostica";state.flight.stop();releaseAttack() end
     end
-    if state.flight.velocity then
-        if not safeRun("Volo",function() state.flight.step(dt) end) then state.flight.stop() end
-    end
     if elapsed(dt,"ui",.25) then safeRun("Interfaccia",updateUI) end
     if elapsed(dt,"marks",.75) then safeRun("Indicatori",markerRefresh) end
     if elapsed(dt,"cache",3) then safeRun("Cache",refreshChestCache) end
     if elapsed(dt,"inventory",1.2) and state.view=="Inventario" then safeRun("Inventario",inventoryRefresh) end
     if elapsed(dt,"perf",2) and cfg.reduceEffects then safeRun("Grafica",applyPerformance) end
+end)
+-- Physics-phase update keeps movement and local collisions synchronized.
+connect(RunService.PreSimulation,function(dt)
+    if not state.alive then return end
+    if state.flight.velocity then
+        if not safeRun("Volo",function() state.flight.step(dt) end) then state.flight.stop() end
+    elseif state.flight.collisionOwner then
+        state.flight.restoreCollisions()
+    end
+end)
+connect(player.CharacterRemoving,function()
+    state.flight.stop()
+    releaseAttack()
+    state.pendingAttack=nil
 end)
 connect(UserInputService.InputBegan,function(i,processed)
     if processed or not cfg.manualOverride then return end
@@ -5132,5 +5194,5 @@ connect(gui.Destroying,function()
     for _,c in ipairs(conns) do c:Disconnect() end
     table.clear(conns)
 end)
-log("Quantum Nova 4.3 caricato; volo ON, automazioni OFF")
-print("[QuantumNova] V4.3 loaded. All automation starts OFF.")
+log("Quantum Nova 4.4 caricato; volo e Noclip ON, automazioni OFF")
+print("[QuantumNova] V4.4 loaded. All automation starts OFF.")
